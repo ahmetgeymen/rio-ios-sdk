@@ -191,35 +191,32 @@ struct RioTokenData: Codable {
     var firebaseToken: String?
     var firebase: CloudOption?
     var deltaTime: Double?
-    
+
+    private func expirationDate(from token: String?) -> Date? {
+        guard let token,
+              let jwt = try? decode(jwt: token)
+        else {
+            return nil
+        }
+        return jwt.expiresAt
+    }
+
     var accessTokenExpiresAt: Date? {
-        get {
-            guard let accessToken = self.accessToken else { return nil }
-            
-            let jwt = try! decode(jwt: accessToken)
-            return jwt.expiresAt
-        }
+        expirationDate(from: accessToken)
     }
-    
+
     var refreshTokenExpiresAt: Date? {
-        get {
-            guard let token = self.refreshToken else { return nil }
-            
-            let jwt = try! decode(jwt: token)
-            return jwt.expiresAt
-        }
+        expirationDate(from: refreshToken)
     }
-    
+
     var userId: String? {
-        if let token = accessToken {
-            let jwt = try! decode(jwt: token)
-            guard let id = jwt.claim(name: "userId").string else {
-                return nil
-            }
-            
-            return id
+        guard let token = accessToken,
+              let jwt = try? decode(jwt: token),
+              let id = jwt.claim(name: "userId").string
+        else {
+            return nil
         }
-        return nil
+        return id
     }
 }
 
@@ -449,8 +446,6 @@ public class Rio {
         
         if let data = self.keychain.getData(RioKeychainKey.token.keyName) {
             
-            let json = try! JSONSerialization.jsonObject(with: data, options: [])
-            
             if let tokenData = try? JSONDecoder().decode(RioTokenData.self, from: data),
                let refreshTokenExpiresAt = tokenData.refreshTokenExpiresAt,
                let accessTokenExpiresAt = tokenData.accessTokenExpiresAt,
@@ -488,14 +483,13 @@ public class Rio {
         logger.log("saveTokenData called with tokenData")
         var storedUserId: String? = nil
         // First get last stored token data from keychain.
-        if let data = self.keychain.getData(RioKeychainKey.token.keyName),
-           let json = try? JSONSerialization.jsonObject(with: data, options: []) {
-            if let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data), let accessToken = storedTokenData.accessToken {
-                let jwt = try! decode(jwt: accessToken)
-                if let userId = jwt.claim(name: "userId").string {
-                    storedUserId = userId
-                }
-            }
+        if let data = keychain.getData(RioKeychainKey.token.keyName),
+           let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data),
+           let accessToken = storedTokenData.accessToken,
+           let jwt = try? decode(jwt: accessToken),
+           let userId = jwt.claim(name: "userId").string
+        {
+            storedUserId = userId
         }
         
         var tokenDataWithDeltaTime = tokenData
@@ -786,8 +780,9 @@ public class Rio {
             let req = AuthWithCustomTokenRequest()
             req.customToken = customToken
             
-            let jwt = try! decode(jwt: customToken)
-            guard let id = jwt.claim(name: "userId").string else {
+            guard let jwt = try? decode(jwt: customToken),
+                  let id = jwt.claim(name: "userId").string
+            else {
                 return
             }
             
@@ -1072,27 +1067,24 @@ public class Rio {
             options2.instanceID != nil &&
             options2.classID != nil {
             
-            var userIdentity = ""
-            var userId = ""
-            if let data = self.keychain.getData(RioKeychainKey.token.keyName),
-               let json = try? JSONSerialization.jsonObject(with: data, options: []) {
-                if let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data), let accessToken = storedTokenData.accessToken {
-                    let jwt = try! decode(jwt: accessToken)
-                    if let id = jwt.claim(name: "userId").string {
-                        userId = id
-                    }
-                    if let identity = jwt.claim(name: "identity").string {
-                        userIdentity = identity
-                    }
-                }
+            var userId: String?
+            var userIdentity: String?
+            
+            if let data = keychain.getData(RioKeychainKey.token.keyName),
+               let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data),
+               let accessToken = storedTokenData.accessToken,
+               let jwt = try? decode(jwt: accessToken)
+            {
+                userId = jwt.claim(name: "userId").string
+                userIdentity = jwt.claim(name: "identity").string
             }
             
             onSuccess(RioCloudObject(
                 projectID: self.projectId,
                 classID: classId,
                 instanceID: options2.instanceID!,
-                userID: userId,
-                userIdentity: userIdentity,
+                userID: userId ?? "",
+                userIdentity: userIdentity ?? "",
                 rio: self,
                 isLocal: true
             ))
@@ -1123,21 +1115,18 @@ public class Rio {
             }
             
             if let respInstanceId = cloudResponse.instanceId {
-                
-                var userIdentity: String?
                 var userId: String?
-                if let data = self.keychain.getData(RioKeychainKey.token.keyName) {
-                    let json = try! JSONSerialization.jsonObject(with: data, options: [])
-                    if let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data), let accessToken = storedTokenData.accessToken {
-                        let jwt = try! decode(jwt: accessToken)
-                        if let id = jwt.claim(name: "userId").string {
-                            userId = id
-                        }
-                        if let identity = jwt.claim(name: "identity").string {
-                            userIdentity = identity
-                        }
-                    }
+                var userIdentity: String?
+                
+                if let data = keychain.getData(RioKeychainKey.token.keyName),
+                   let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data),
+                   let accessToken = storedTokenData.accessToken,
+                   let jwt = try? decode(jwt: accessToken)
+                {
+                    userId = jwt.claim(name: "userId").string
+                    userIdentity = jwt.claim(name: "identity").string
                 }
+                
                 let object = RioCloudObject(
                     projectID: self.projectId,
                     classID: classId,
@@ -1411,16 +1400,19 @@ public class RioCloudObjectState {
         
         var userId = userID
         var identity = userIdentity
-        if userId.isEmpty, identity.isEmpty, let data = KeychainSwift().getData(RioKeychainKey.token.keyName),
-           let json = try? JSONSerialization.jsonObject(with: data, options: []) {
-            if let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data), let accessToken = storedTokenData.accessToken {
-                let jwt = try! decode(jwt: accessToken)
-                if let id = jwt.claim(name: "userId").string {
-                    userId = id
-                }
-                if let theIdentity = jwt.claim(name: "identity").string {
-                    identity = theIdentity
-                }
+        
+        if userId.isEmpty,
+           identity.isEmpty,
+           let data = KeychainSwift().getData(RioKeychainKey.token.keyName),
+           let storedTokenData = try? JSONDecoder().decode(RioTokenData.self, from: data),
+           let accessToken = storedTokenData.accessToken,
+           let jwt = try? decode(jwt: accessToken)
+        {
+            if let claimedUserId = jwt.claim(name: "userId").string {
+                userId = claimedUserId
+            }
+            if let claimedIdentity = jwt.claim(name: "identity").string {
+                identity = claimedIdentity
             }
         }
         
